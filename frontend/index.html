@@ -1,13 +1,87 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React</title>
+    <title>Torrentium - P2P File Sharing</title>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+    <div id="app">
+      <header>
+        <h1>Torrentium - Decentralized P2P File Sharing</h1>
+        <div id="network-status"></div>
+      </header>
+
+      <main>
+        <section class="node-info">
+          <h2>Node Information</h2>
+          <div>
+            <strong>Peer ID:</strong>
+            <code id="peer-id">Loading...</code>
+          </div>
+          <div>
+            <strong>Listening Addresses:</strong>
+            <div id="addresses">Loading...</div>
+          </div>
+        </section>
+
+        <section class="actions">
+          <div class="action-group">
+            <h3>Add File</h3>
+            <input type="file" id="file-input" />
+            <button id="add-file-btn">Share File</button>
+          </div>
+
+          <div class="action-group">
+            <h3>Search</h3>
+            <input
+              type="text"
+              id="search-input"
+              placeholder="Enter CID or filename..."
+            />
+            <button id="search-btn">Search</button>
+          </div>
+
+          <div class="action-group">
+            <h3>Download</h3>
+            <input type="text" id="download-input" placeholder="Enter CID..." />
+            <button id="download-btn">Download</button>
+          </div>
+
+          <div class="action-group">
+            <h3>Connect to Peer</h3>
+            <input
+              type="text"
+              id="connect-input"
+              placeholder="Enter multiaddr..."
+            />
+            <button id="connect-btn">Connect</button>
+          </div>
+
+          <button id="refresh-btn">Refresh All</button>
+        </section>
+
+        <div id="status"></div>
+
+        <div class="data-sections">
+          <section class="local-files">
+            <h2>Your Shared Files</h2>
+            <div id="local-files">Loading...</div>
+          </section>
+
+          <section class="peers">
+            <h2>Connected Peers</h2>
+            <div id="peers">Loading...</div>
+          </section>
+
+          <section class="search-results">
+            <h2>Search Results</h2>
+            <div id="search-results">No search performed yet</div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

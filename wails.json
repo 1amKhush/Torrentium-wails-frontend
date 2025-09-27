@@ -1,13 +1,40 @@
 {
   "$schema": "https://wails.io/schemas/config.v2.json",
-  "name": "myproject",
-  "outputfilename": "myproject",
-  "frontend:install": "npm install",
-  "frontend:build": "npm run build",
-  "frontend:dev:watcher": "npm run dev",
-  "frontend:dev:serverUrl": "auto",
+  "name": "torrentium",
+  "outputfilename": "torrentium",
+  "frontend": {
+    "dir": "./frontend",
+    "install": "npm install",
+    "build": "npm run build",
+    "dev": "npm run dev",
+    "package": {
+      "manager": "npm"
+    }
+  },
+  "backend": {
+    "dir": "./backend"
+  },
   "author": {
-    "name": "Shakeela",
-    "email": "b24ee1071@iitj.ac.in"
-  }
+    "name": "Torrentium Team",
+    "email": "team@torrentium.io"
+  },
+  "info": {
+    "companyName": "Torrentium",
+    "productName": "Torrentium P2P File Sharing",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © 2024, Torrentium Team",
+    "comments": "Decentralized P2P File Sharing Application"
+  },
+  "build": {
+    "compiler": "go",
+    "targets": [
+      {
+        "platform": "windows",
+        "arch": "amd64"
+      }
+    ]
+  },
+  "nsisType": "multiple",
+  "obfuscated": false,
+  "garbleargs": ""
 }

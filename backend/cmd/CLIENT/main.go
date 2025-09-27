@@ -912,7 +912,6 @@ func (c *Client) requestManifest(peer *webRTC.SimpleWebRTCPeer, cidStr string) (
 }
 
 func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetries int) (*webRTC.SimpleWebRTCPeer, error) {
-
 	// First, test ICE connectivity
 	log.Printf("Testing ICE connectivity before attempting WebRTC connection...")
 	if err := webRTC.TestICEConnectivity(); err != nil {
@@ -933,19 +932,18 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-
+		// FIX: removed defer cancel inside loop to avoid accumulating defers
 		info := peer.AddrInfo{ID: targetPeerID}
 		if pinfo, err := c.dht.FindPeer(ctx, targetPeerID); err == nil && len(pinfo.Addrs) > 0 {
 			info = pinfo
 		} else {
-
+			cancel()
 			lastErr = fmt.Errorf("dht lookup failed: %w", err)
 			continue
 		}
 
 		if len(info.Addrs) == 0 {
-			log.Printf("debug 5")
+			cancel()
 			lastErr = fmt.Errorf("peer %s has no known multiaddrs", targetPeerID)
 			continue
 		}
@@ -960,6 +958,7 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			err := c.host.Connect(connectCtx, info)
 			connectCancel()
 			if err != nil {
+				cancel()
 				log.Printf("failed to connect to peer %s: %v", info.ID, err)
 				fmt.Printf("DHT lookup failed: %v. This could be a network issue now trying connection using relays.\n", err)
 				return nil, err
@@ -973,6 +972,7 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 
 		webrtcPeer, err := webRTC.NewSimpleWebRTCPeer(c.onDataChannelMessage, c.onWebRTCPeerClose)
 		if err != nil {
+			cancel()
 			lastErr = err
 			return nil, err
 			// continue
@@ -980,6 +980,7 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 
 		offer, err := webrtcPeer.CreateOffer()
 		if err != nil {
+			cancel()
 			webrtcPeer.Close()
 			lastErr = err
 			return nil, err
@@ -989,6 +990,7 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 		s, err := c.host.NewStream(streamCtx, targetPeerID, p2p.SignalingProtocolID)
 		streamCancel()
 		if err != nil {
+			cancel()
 			webrtcPeer.Close()
 			lastErr = err
 			return nil, err
@@ -1038,11 +1040,14 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 
 		// MODIFIED: Add block to wait for the data channels to be ready
 		if err := webrtcPeer.WaitForDataChannels(10 * time.Second); err != nil {
+			cancel()
 			webrtcPeer.Close()
 			lastErr = fmt.Errorf("data channels did not open in time: %w", err)
 			continue
 		}
 
+		// SUCCESS path
+		cancel()
 		fmt.Printf("WebRTC connection established with %s\n", targetPeerID)
 		c.peersMux.Lock()
 		c.webRTCPeers[targetPeerID] = webrtcPeer
@@ -1053,137 +1058,132 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 	return nil, lastErr
 }
 
-func (c *Client) handleWebRTCOffer(offer, remotePeerID string, s network.Stream) (string, error) {
-	peerID, err := peer.Decode(remotePeerID)
-	if err != nil {
-		return "", fmt.Errorf("invalid peer ID: %w", err)
-	}
+// ===== Frontend Integration Layer =====
 
-	webrtcPeer, err := webRTC.NewSimpleWebRTCPeer(c.onDataChannelMessage, c.onWebRTCPeerClose)
-	if err != nil {
-		return "", err
-	}
-
-	webrtcPeer.SetSignalingStream(s)
-
-	answer, err := webrtcPeer.HandleOffer(offer)
-	if err != nil {
-		webrtcPeer.Close()
-		return "", err
-	}
-
-	c.peersMux.Lock()
-	c.webRTCPeers[peerID] = webrtcPeer
-	c.peersMux.Unlock()
-
-	return answer, nil
+// Data transfer objects (kept separate from internal types)
+type FrontendFileInfo struct {
+	CID   string `json:"cid"`
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	Path  string `json:"path"`
+	Hash  string `json:"hash"`
 }
 
-func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRTC.SimpleWebRTCPeer) {
-	if !msg.IsString {
-		log.Printf("Received unexpected binary message, expecting JSON.")
-		return
-	}
-	// Robustness: Handle empty messages that might be causing "Unknown control command: "
-	if len(msg.Data) == 0 {
-		return
-	}
-	var ctrl controlMessage
-	if err := json.Unmarshal(msg.Data, &ctrl); err != nil {
-		var ping map[string]string
-		if err2 := json.Unmarshal(msg.Data, &ping); err2 == nil {
-			if ping["type"] == "ping" {
-				// Respond to ping
-				pong := map[string]string{"type": "pong"}
-				peer.SendJSONReliable(pong)
-				return
-			} else if ping["type"] == "pong" {
-				c.handlePong(peer.GetSignalingStream().Conn().RemotePeer())
-				return
-			}
-		}
-		log.Printf("Failed to unmarshal control message: %v. Raw message: %s", err, string(msg.Data))
-		return
-	}
-	c.handleControlMessage(ctrl, peer)
+type PeerInfo struct {
+	ID      string `json:"id"`
+	Address string `json:"address"`
 }
 
-func (c *Client) handleControlMessage(ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
+type NetworkHealth struct {
+	ConnectedPeers int    `json:"connected_peers"`
+	DHTTableSize   int    `json:"dht_table_size"`
+	Status         string `json:"status"` // good | warning | error
+}
+
+type DownloadProgressSummary struct {
+	CID      string  `json:"cid"`
+	Progress float64 `json:"progress"`
+	Status   string  `json:"status"`
+}
+
+// AddFile exposes file sharing to frontend
+func (c *Client) AddFile(path string) error {
+	return c.addFile(path)
+}
+
+// ListLocalFiles returns shared file metadata
+func (c *Client) ListLocalFiles() ([]FrontendFileInfo, error) {
 	ctx := context.Background()
-	switch ctrl.Command {
-	case "REQUEST_MANIFEST":
-		c.handleManifestRequest(ctx, ctrl, peer)
-	case "MANIFEST":
-		manifestChMu.Lock()
-		if ch, ok := manifestWaiters[ctrl.CID]; ok {
-			ch <- ctrl
-		}
-		manifestChMu.Unlock()
-	case "REQUEST_PIECE":
-		go c.handlePieceRequest(ctx, ctrl, peer)
-	case "PIECE_CHUNK":
-		c.handlePieceChunk(ctrl, peer)
-	case "CHUNK_ACK":
-		c.handleChunkAck(ctrl)
-	default:
-		// log.Printf("Unknown control command: %s", ctrl.Command)
+	files, err := c.db.GetLocalFiles(ctx)
+	if err != nil {
+		return nil, err
 	}
+	result := make([]FrontendFileInfo, 0, len(files))
+	for _, f := range files {
+		result = append(result, FrontendFileInfo{
+			CID:  f.CID,
+			Name: f.Filename,
+			Size: f.FileSize,
+			Path: f.FilePath,
+			Hash: f.FileHash,
+		})
+	}
+	return result, nil
 }
 
-func (c *Client) handlePieceChunk(ctrl controlMessage, peer *webRTC.SimpleWebRTCPeer) {
-	c.downloadsMux.RLock()
-	state, ok := c.activeDownloads[ctrl.CID]
-	c.downloadsMux.RUnlock()
-	if !ok {
-		return
-	}
-
-	// Send an ACK back to the sender using reliable channel
-	ackMsg := controlMessage{
-		Command:  "CHUNK_ACK",
-		CID:      ctrl.CID,
-		Index:    ctrl.Index,
-		Sequence: ctrl.Sequence,
-	}
-	if err := peer.SendJSONReliable(ackMsg); err != nil {
-		log.Printf("Failed to send ACK for chunk %d of piece %d: %v", ctrl.Sequence, ctrl.Index, err)
-	}
-
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	if state.PieceStatus[ctrl.Index] {
-		return // Already have this piece
-	}
-
-	if state.pieceBuffers[int(ctrl.Index)] == nil {
-		state.pieceBuffers[int(ctrl.Index)] = make([][]byte, ctrl.TotalChunks)
-	}
-
-	chunkData, err := hex.DecodeString(ctrl.Payload)
+// SearchByCID returns providers instead of printing to stdout
+func (c *Client) SearchByCID(cidStr string) ([]PeerInfo, error) {
+	fileCID, err := cid.Decode(cidStr)
 	if err != nil {
-		log.Printf("Failed to decode chunk payload: %v", err)
-		return
+		return nil, fmt.Errorf("invalid CID: %w", err)
 	}
-
-	state.pieceBuffers[int(ctrl.Index)][ctrl.ChunkIndex] = chunkData
-	_ = state.Progress.Add(len(chunkData))
-
-	// Check if piece is complete
-	isComplete := true
-	var pieceSize int
-	for _, chunk := range state.pieceBuffers[int(ctrl.Index)] {
-		if chunk == nil {
-			isComplete = false
-			break
+	providers, err := c.findProvidersWithTimeout(fileCID, 30*time.Second, MaxProviders)
+	if err != nil {
+		return nil, err
+	}
+	var out []PeerInfo
+	for _, p := range providers {
+		addr := ""
+		if len(p.Addrs) > 0 {
+			addr = p.Addrs[0].String()
 		}
-		pieceSize += len(chunk)
+		out = append(out, PeerInfo{
+			ID:      p.ID.String(),
+			Address: addr,
+		})
 	}
+	return out, nil
+}
 
-	if isComplete {
-		// Stop the timer for this piece
-		if timer, ok := state.pieceTimers[int(ctrl.Index)]; ok {
-			timer.Stop()
+// SearchByText queries local DB index
+func (c *Client) SearchByText(q string) ([]FrontendFileInfo, error) {
+	ctx := context.Background()
+	matches, err := c.db.SearchByFilename(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]FrontendFileInfo, 0, len(matches))
+	for _, m := range matches {
+		res = append(res, FrontendFileInfo{
+			CID:  m.CID,
+			Name: m.Filename,
+			Size: m.FileSize,
+			Path: m.FilePath,
+			Hash: m.FileHash,
+		})
+	}
+	return res, nil
+}
+
+// DownloadFile starts download (non-blocking optional improvement)
+func (c *Client) DownloadFile(cidStr string) error {
+	// For now reuse existing synchronous method
+	return c.downloadFile(cidStr)
+}
+
+// ConnectToPeer wrapper
+func (c *Client) ConnectToPeer(maddr string) error {
+	return c.connectToPeer(maddr)
+}
+
+// GetConnectedPeers returns currently connected peers
+func (c *Client) GetConnectedPeers() []PeerInfo {
+	peers := c.host.Network().Peers()
+	out := make([]PeerInfo, 0, len(peers))
+	for _, pid := range peers {
+		conn := c.host.Network().ConnsToPeer(pid)
+		if len(conn) > 0 {
+			out = append(out, PeerInfo{
+				ID:      pid.String(),
+				Address: conn[0].RemoteMultiaddr().String(),
+			})
+		}
+	}
+	return out
+}
+
+// AnnounceFile re-announces a file
+func (c *Client) AnnounceFile(cidStr
 			delete(state.pieceTimers, int(ctrl.Index))
 		}
 
@@ -1425,4 +1425,16 @@ func (c *Client) handlePong(pid peer.ID) {
 		c.rttMux.Unlock()
 		delete(c.pingTimes, pid)
 	}
+}
+
+// Add these missing methods at the end of the file
+
+// StartDHTMaintenance exposes the startDHTMaintenance method
+func (c *Client) StartDHTMaintenance() {
+	c.startDHTMaintenance()
+}
+
+// HandleWebRTCOffer exposes the handleWebRTCOffer method
+func (c *Client) HandleWebRTCOffer(offer, remotePeerID string, s network.Stream) (string, error) {
+	return c.handleWebRTCOffer(offer, remotePeerID, s)
 }

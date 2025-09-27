@@ -1,158 +1,190 @@
-import React, { createContext, useContext, useReducer, useEffect } from 'react'
-import { mockUser, mockTransfers, mockPeers } from '../data/mockData'
+import React, { createContext, useContext, useEffect, useState } from 'react';
 
-const AppContext = createContext()
+const AppContext = createContext();
 
-const initialState = {
-  user: mockUser,
-  transfers: mockTransfers,
-  peers: mockPeers,
-  notifications: [],
-  theme: 'dark'
-}
-
-function appReducer(state, action) {
-  switch (action.type) {
-    case 'UPDATE_USER':
-      return { ...state, user: { ...state.user, ...action.payload } }
-    
-    case 'ADD_TRANSFER':
-      return { 
-        ...state, 
-        transfers: [action.payload, ...state.transfers] 
-      }
-    
-    case 'UPDATE_TRANSFER':
-      return {
-        ...state,
-        transfers: state.transfers.map(transfer =>
-          transfer.id === action.payload.id
-            ? { ...transfer, ...action.payload }
-            : transfer
-        )
-      }
-    
-    case 'DELETE_TRANSFER':
-      return {
-        ...state,
-        transfers: state.transfers.filter(transfer => transfer.id !== action.payload)
-      }
-    
-    case 'ADD_PEER':
-      return {
-        ...state,
-        peers: [action.payload, ...state.peers]
-      }
-    
-    case 'UPDATE_PEER':
-      return {
-        ...state,
-        peers: state.peers.map(peer =>
-          peer.id === action.payload.id
-            ? { ...peer, ...action.payload }
-            : peer
-        )
-      }
-    
-    case 'BLOCK_PEER':
-      return {
-        ...state,
-        peers: state.peers.map(peer =>
-          peer.id === action.payload
-            ? { ...peer, isBlocked: true }
-            : peer
-        )
-      }
-    
-    case 'UNBLOCK_PEER':
-      return {
-        ...state,
-        peers: state.peers.map(peer =>
-          peer.id === action.payload
-            ? { ...peer, isBlocked: false }
-            : peer
-        )
-      }
-    
-    case 'ADD_NOTIFICATION':
-      return {
-        ...state,
-        notifications: [...state.notifications, action.payload]
-      }
-    
-    case 'REMOVE_NOTIFICATION':
-      return {
-        ...state,
-        notifications: state.notifications.filter(notif => notif.id !== action.payload)
-      }
-    
-    case 'SET_THEME':
-      return {
-        ...state,
-        theme: action.payload
-      }
-    
-    default:
-      return state
+export const useApp = () => {
+  const context = useContext(AppContext);
+  if (!context) {
+    throw new Error('useApp must be used within an AppProvider');
   }
-}
+  return context;
+};
 
-export function AppProvider({ children }) {
-  const [state, dispatch] = useReducer(appReducer, initialState)
+export const AppProvider = ({ children }) => {
+  const [isWailsReady, setIsWailsReady] = useState(false);
+  const [peerID, setPeerID] = useState('');
+  const [files, setFiles] = useState([]);
+  const [peers, setPeers] = useState([]);
+  const [downloads, setDownloads] = useState([]);
+  const [networkHealth, setNetworkHealth] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
-  // Load state from localStorage on mount
+  // Initialize Wails connection
   useEffect(() => {
-    const savedState = localStorage.getItem('torrentium-state')
-    if (savedState) {
+    const initWails = async () => {
       try {
-        const parsed = JSON.parse(savedState)
-        dispatch({ type: 'UPDATE_USER', payload: parsed.user || mockUser })
+        // Wait for Wails to be ready
+        if (window.go && window.go.app && window.go.app.App) {
+          const id = await window.go.app.App.GetPeerID();
+          setPeerID(id);
+          setIsWailsReady(true);
+          
+          // Get initial data
+          await refreshData();
+        } else {
+          // Retry after a short delay if Wails isn't ready
+          setTimeout(initWails, 100);
+        }
       } catch (error) {
-        console.error('Failed to load saved state:', error)
+        console.error('Failed to initialize Wails:', error);
+        setError('Failed to connect to backend');
       }
-    }
-  }, [])
+    };
 
-  // Save state to localStorage on changes
+    initWails();
+  }, []);
+
+  // Periodic data refresh
   useEffect(() => {
-    localStorage.setItem('torrentium-state', JSON.stringify({
-      user: state.user,
-      theme: state.theme
-    }))
-  }, [state.user, state.theme])
+    if (!isWailsReady) return;
 
-  const addNotification = (message, type = 'info') => {
-    const notification = {
-      id: Date.now().toString(),
-      message,
-      type,
-      timestamp: new Date()
+    const interval = setInterval(refreshData, 5000);
+    return () => clearInterval(interval);
+  }, [isWailsReady]);
+
+  const refreshData = async () => {
+    if (!window.go?.app?.App) return;
+
+    try {
+      const [localFiles, connectedPeers, networkHealthData] = await Promise.all([
+        window.go.app.App.ListLocalFiles(),
+        window.go.app.App.GetConnectedPeers(),
+        window.go.app.App.GetNetworkHealth(),
+      ]);
+
+      setFiles(localFiles || []);
+      setPeers(connectedPeers || []);
+      setNetworkHealth(networkHealthData || {});
+    } catch (error) {
+      console.error('Failed to refresh data:', error);
     }
-    dispatch({ type: 'ADD_NOTIFICATION', payload: notification })
+  };
+
+  const addFile = async (filePath) => {
+    if (!window.go?.app?.App) throw new Error('Backend not ready');
     
-    // Auto remove after 5 seconds
-    setTimeout(() => {
-      dispatch({ type: 'REMOVE_NOTIFICATION', payload: notification.id })
-    }, 5000)
-  }
+    setLoading(true);
+    try {
+      await window.go.app.App.AddFile(filePath);
+      await refreshData();
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to add file:', error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const downloadFile = async (cid) => {
+    if (!window.go?.app?.App) throw new Error('Backend not ready');
+    
+    setLoading(true);
+    try {
+      await window.go.app.App.DownloadFile(cid);
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to download file:', error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const searchFiles = async (query) => {
+    if (!window.go?.app?.App) throw new Error('Backend not ready');
+    
+    setLoading(true);
+    try {
+      let results;
+      if (query.startsWith('bafy') || query.startsWith('Qm')) {
+        results = await window.go.app.App.SearchByCID(query);
+      } else {
+        results = await window.go.app.App.SearchByText(query);
+      }
+      return results || [];
+    } catch (error) {
+      console.error('Failed to search:', error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const connectToPeer = async (multiaddr) => {
+    if (!window.go?.app?.App) throw new Error('Backend not ready');
+    
+    setLoading(true);
+    try {
+      await window.go.app.App.ConnectToPeer(multiaddr);
+      await refreshData();
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to connect to peer:', error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const announceFile = async (cid) => {
+    if (!window.go?.app?.App) throw new Error('Backend not ready');
+    
+    try {
+      await window.go.app.App.AnnounceFile(cid);
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to announce file:', error);
+      throw error;
+    }
+  };
+
+  const getListeningAddresses = async () => {
+    if (!window.go?.app?.App) return [];
+    
+    try {
+      return await window.go.app.App.GetListeningAddresses();
+    } catch (error) {
+      console.error('Failed to get listening addresses:', error);
+      return [];
+    }
+  };
 
   const value = {
-    ...state,
-    dispatch,
-    addNotification
-  }
+    // State
+    isWailsReady,
+    peerID,
+    files,
+    peers,
+    downloads,
+    networkHealth,
+    loading,
+    error,
+    
+    // Actions
+    addFile,
+    downloadFile,
+    searchFiles,
+    connectToPeer,
+    announceFile,
+    getListeningAddresses,
+    refreshData,
+  };
 
   return (
     <AppContext.Provider value={value}>
       {children}
     </AppContext.Provider>
-  )
-}
-
-export function useApp() {
-  const context = useContext(AppContext)
-  if (!context) {
-    throw new Error('useApp must be used within an AppProvider')
-  }
-  return context
-}
+  );
+};
