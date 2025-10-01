@@ -25,6 +25,10 @@ func NewApp() *App {
 func (a *App) OnStartup(ctx context.Context) {
 	a.ctx = ctx
 
+	// Ensure the main window is visible when the app launches
+	runtime.WindowShow(ctx)
+	runtime.WindowUnminimise(ctx)
+
 	// Start background tasks
 	go a.StartTorrentTasks()
 
@@ -52,7 +56,7 @@ func (a *App) onReady() {
 		// Use a fallback simple icon if the file can't be loaded
 		iconData = []byte{} // Empty fallback
 	}
-	
+
 	// Set the systray icon
 	systray.SetIcon(iconData)
 	systray.SetTitle("Torrentium")
