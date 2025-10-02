@@ -2,96 +2,121 @@ package main
 
 import (
 	"context"
-	"embed"
+	"fmt"
 	"log"
-	"time"
 
-	"github.com/getlantern/systray"
+	"github.com/1amkhush/torrentium/pkg/db"
+	"github.com/1amkhush/torrentium/pkg/p2p"
+	"github.com/1amkhush/torrentium/pkg/torrentium_client"
+
+	"github.com/joho/godotenv"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-//go:embed build/windows/icon.ico
-var iconFS embed.FS
-
+// App struct holds the backend client
 type App struct {
-	ctx        context.Context
-	shouldQuit bool
+	ctx    context.Context
+	client *torrentium_client.Client // Instance of your backend
 }
 
+// NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{}
 }
 
+// OnStartup is called when the app starts. We initialize the backend here.
 func (a *App) OnStartup(ctx context.Context) {
 	a.ctx = ctx
+	_ = godotenv.Load()
 
-	// Ensure the main window is visible when the app launches
-	runtime.WindowShow(ctx)
-	runtime.WindowUnminimise(ctx)
-
-	// Start background tasks
-	go a.StartTorrentTasks()
-
-	// Setup system tray
-	go func() {
-		systray.Run(a.onReady, a.onExit)
-	}()
-}
-
-// OnBeforeClose is called when the application is about to quit
-func (a *App) OnBeforeClose(ctx context.Context) (prevent bool) {
-	if a.shouldQuit {
-		return false // allow the app to close
+	// 1. Initialize the database
+	DB := db.InitDB()
+	if DB == nil {
+		log.Fatal("Database initialization failed")
 	}
-	runtime.WindowHide(ctx)
-	log.Println("Window hidden. Torrentium still running in background.")
-	return true // prevent the app from closing
-}
+	repo := db.NewRepository(DB)
 
-func (a *App) onReady() {
-	// Load icon from embedded assets
-	iconData, err := iconFS.ReadFile("build/windows/icon.ico")
+	// 2. Set up the libp2p host and DHT
+	hostCtx := context.Background()
+	h, d, err := p2p.NewHost(hostCtx, "/ip4/0.0.0.0/tcp/0", nil)
 	if err != nil {
-		log.Printf("Failed to load icon: %v", err)
-		// Use a fallback simple icon if the file can't be loaded
-		iconData = []byte{} // Empty fallback
+		log.Fatalf("Failed to create libp2p host: %v", err)
 	}
 
-	// Set the systray icon
-	systray.SetIcon(iconData)
-	systray.SetTitle("Torrentium")
-	systray.SetTooltip("Torrentium - BitTorrent Client")
-
-	// Menu items
-	mShow := systray.AddMenuItem("Show Torrentium", "Show the main window")
-	systray.AddSeparator()
-	mQuit := systray.AddMenuItem("Quit", "Quit Torrentium")
-
-	// Handle menu clicks
+	// 3. Bootstrap the DHT in the background
 	go func() {
-		for {
-			select {
-			case <-mShow.ClickedCh:
-				runtime.WindowShow(a.ctx)
-				runtime.WindowUnminimise(a.ctx)
-			case <-mQuit.ClickedCh:
-				a.shouldQuit = true
-				systray.Quit()
-				runtime.Quit(a.ctx)
-				return
-			}
+		if err := p2p.Bootstrap(hostCtx, h, d); err != nil {
+			log.Printf("Error bootstrapping DHT: %v", err)
 		}
 	}()
+
+	// 4. Create the client from your library and store it in the App struct
+	a.client = torrentium_client.NewClient(h, d, repo)
+
+	// 5. Start background maintenance tasks for the client
+	a.client.StartDHTMaintenance()
+	log.Println("Torrentium client initialized successfully!")
 }
 
-func (a *App) onExit() {
-	// Cleanup when systray exits
-	log.Println("Systray exiting...")
-}
-
-func (a *App) StartTorrentTasks() {
-	for {
-		log.Println("Torrentium running in background...")
-		time.Sleep(15 * time.Second)
+// OnBeforeClose is called just before the application shuts down.
+func (a *App) OnBeforeClose(ctx context.Context) (prevent bool) {
+	log.Println("Shutting down the libp2p host.")
+	if a.client != nil && a.client.Host != nil {
+		if err := a.client.Host.Close(); err != nil {
+			log.Printf("Error closing host: %v", err)
+		}
 	}
+	return false
+}
+
+// --- Frontend Callable Methods ---
+
+// SelectFile opens a native file dialog to select a file.
+func (a *App) SelectFile() (string, error) {
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select File to Share",
+	})
+}
+
+// AddFile shares a file on the network.
+func (a *App) AddFile(filePath string) (string, error) {
+	if a.client == nil {
+		return "", fmt.Errorf("client is not initialized")
+	}
+	log.Printf("Attempting to add file: %s", filePath)
+	cid, err := a.client.AddFile(filePath)
+	if err != nil {
+		log.Printf("Error adding file: %v", err)
+		return "", err
+	}
+	log.Printf("Successfully added file with CID: %s", cid)
+	return cid, nil
+}
+
+// ListLocalFiles returns a list of files being shared locally.
+func (a *App) ListLocalFiles() ([]db.LocalFile, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("client is not initialized")
+	}
+	return a.client.ListLocalFiles()
+}
+
+// DownloadFile starts a file download in the background.
+// It emits events to the frontend to report progress.
+func (a *App) DownloadFile(cid string) error {
+	if a.client == nil {
+		return fmt.Errorf("client is not initialized")
+	}
+	go func() {
+		log.Printf("Starting download for CID: %s", cid)
+		err := a.client.DownloadFile(cid)
+		if err != nil {
+			log.Printf("Error downloading file: %v", err)
+			runtime.EventsEmit(a.ctx, "download-error", err.Error())
+		} else {
+			log.Printf("Successfully downloaded file with CID: %s", cid)
+			runtime.EventsEmit(a.ctx, "download-complete", cid)
+		}
+	}()
+	return nil
 }
