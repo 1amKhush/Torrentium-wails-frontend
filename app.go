@@ -2,21 +2,40 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"log"
+	"os"
+	"time" // <-- Import the time package
 
 	"github.com/1amkhush/torrentium/pkg/db"
 	"github.com/1amkhush/torrentium/pkg/p2p"
 	"github.com/1amkhush/torrentium/pkg/torrentium_client"
-
+	"github.com/ipfs/go-cid"
 	"github.com/joho/godotenv"
+	"github.com/multiformats/go-multihash"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// App struct holds the backend client
+// LocalFileFE is a frontend-friendly version of the db.LocalFile struct.
+// It converts time.Time to a string so Wails can handle it.
+type LocalFileFE struct {
+	CID       string `json:"cid"`
+	Filename  string `json:"filename"`
+	FileSize  int64  `json:"fileSize"`
+	FilePath  string `json:"filePath"`
+	FileHash  string `json:"fileHash"`
+	// Assuming your db.LocalFile has this field. Change it if the name is different.
+	CreatedAt string `json:"createdAt"`
+}
+
+
+// App struct holds the backend client and the repository
 type App struct {
 	ctx    context.Context
 	client *torrentium_client.Client // Instance of your backend
+	repo   *db.Repository            // Use a pointer
 }
 
 // NewApp creates a new App application struct
@@ -24,85 +43,117 @@ func NewApp() *App {
 	return &App{}
 }
 
-// OnStartup is called when the app starts. We initialize the backend here.
+// OnStartup is called when the app starts.
 func (a *App) OnStartup(ctx context.Context) {
 	a.ctx = ctx
 	_ = godotenv.Load()
 
-	// 1. Initialize the database
 	DB := db.InitDB()
 	if DB == nil {
 		log.Fatal("Database initialization failed")
 	}
-	repo := db.NewRepository(DB)
+	a.repo = db.NewRepository(DB)
 
-	// 2. Set up the libp2p host and DHT
 	hostCtx := context.Background()
 	h, d, err := p2p.NewHost(hostCtx, "/ip4/0.0.0.0/tcp/0", nil)
 	if err != nil {
 		log.Fatalf("Failed to create libp2p host: %v", err)
 	}
 
-	// 3. Bootstrap the DHT in the background
 	go func() {
 		if err := p2p.Bootstrap(hostCtx, h, d); err != nil {
 			log.Printf("Error bootstrapping DHT: %v", err)
 		}
 	}()
 
-	// 4. Create the client from your library and store it in the App struct
-	a.client = torrentium_client.NewClient(h, d, repo)
-
-	// 5. Start background maintenance tasks for the client
+	a.client = torrentium_client.NewClient(h, d, a.repo)
 	a.client.StartDHTMaintenance()
 	log.Println("Torrentium client initialized successfully!")
 }
 
 // OnBeforeClose is called just before the application shuts down.
 func (a *App) OnBeforeClose(ctx context.Context) (prevent bool) {
-	log.Println("Shutting down the libp2p host.")
-	if a.client != nil && a.client.Host != nil {
-		if err := a.client.Host.Close(); err != nil {
-			log.Printf("Error closing host: %v", err)
+	log.Println("Shutting down the client.")
+	if a.client != nil {
+		if err := a.client.Close(); err != nil {
+			log.Printf("Error closing client: %v", err)
 		}
 	}
 	return false
 }
 
-// --- Frontend Callable Methods ---
-
-// SelectFile opens a native file dialog to select a file.
 func (a *App) SelectFile() (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select File to Share",
 	})
 }
 
-// AddFile shares a file on the network.
+// AddFile shares a file on the network and returns its CID.
 func (a *App) AddFile(filePath string) (string, error) {
 	if a.client == nil {
 		return "", fmt.Errorf("client is not initialized")
 	}
 	log.Printf("Attempting to add file: %s", filePath)
-	cid, err := a.client.AddFile(filePath)
-	if err != nil {
+
+	if err := a.client.AddFile(filePath); err != nil {
 		log.Printf("Error adding file: %v", err)
 		return "", err
 	}
-	log.Printf("Successfully added file with CID: %s", cid)
-	return cid, nil
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to re-open file for CID calculation: %w", err)
+	}
+	defer f.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", fmt.Errorf("failed to calculate hash for CID: %w", err)
+	}
+
+	fileHashBytes := hasher.Sum(nil)
+	mhash, err := multihash.Encode(fileHashBytes, multihash.SHA2_256)
+	if err != nil {
+		return "", fmt.Errorf("failed to create multihash for CID: %w", err)
+	}
+
+	fileCID := cid.NewCidV1(cid.Raw, mhash)
+	cidStr := fileCID.String()
+
+	log.Printf("Successfully added file with CID: %s", cidStr)
+	return cidStr, nil
 }
 
 // ListLocalFiles returns a list of files being shared locally.
-func (a *App) ListLocalFiles() ([]db.LocalFile, error) {
-	if a.client == nil {
-		return nil, fmt.Errorf("client is not initialized")
+// It now returns the frontend-safe struct.
+func (a *App) ListLocalFiles() ([]LocalFileFE, error) {
+	if a.repo == nil {
+		return nil, fmt.Errorf("repository is not initialized")
 	}
-	return a.client.ListLocalFiles()
+
+	localFiles, err := a.repo.GetLocalFiles(a.ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert the database models to our frontend-friendly struct
+	feFiles := make([]LocalFileFE, len(localFiles))
+	for i, file := range localFiles {
+		feFiles[i] = LocalFileFE{
+			CID:       file.CID,
+			Filename:  file.Filename,
+			FileSize:  file.FileSize,
+			FilePath:  file.FilePath,
+			FileHash:  file.FileHash,
+			CreatedAt: file.CreatedAt.Format(time.RFC3339), // Convert time to a standard string
+		}
+	}
+
+	return feFiles, nil
 }
 
+
 // DownloadFile starts a file download in the background.
-// It emits events to the frontend to report progress.
 func (a *App) DownloadFile(cid string) error {
 	if a.client == nil {
 		return fmt.Errorf("client is not initialized")

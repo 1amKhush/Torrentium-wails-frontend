@@ -6,7 +6,9 @@ toolchain go1.24.4
 
 require (
 	github.com/1amkhush/torrentium v0.0.0-unpublished
+	github.com/ipfs/go-cid v0.5.0
 	github.com/joho/godotenv v1.5.1
+	github.com/multiformats/go-multihash v0.2.3
 	github.com/wailsapp/wails/v2 v2.10.2
 )
 
@@ -32,7 +34,6 @@ require (
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/ipfs/boxo v0.33.1 // indirect
-	github.com/ipfs/go-cid v0.5.0 // indirect
 	github.com/ipfs/go-datastore v0.8.2 // indirect
 	github.com/ipfs/go-log/v2 v2.8.0 // indirect
 	github.com/ipld/go-ipld-prime v0.21.0 // indirect
@@ -78,7 +79,6 @@ require (
 	github.com/multiformats/go-multiaddr-fmt v0.1.0 // indirect
 	github.com/multiformats/go-multibase v0.2.0 // indirect
 	github.com/multiformats/go-multicodec v0.9.2 // indirect
-	github.com/multiformats/go-multihash v0.2.3 // indirect
 	github.com/multiformats/go-multistream v0.6.1 // indirect
 	github.com/multiformats/go-varint v0.0.7 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
