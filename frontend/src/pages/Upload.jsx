@@ -1,66 +1,125 @@
-// frontend/src/pages/Upload.jsx
 import React, { useState } from 'react';
 import { Button } from '../components/ui/Button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card';
 import { Input } from '../components/ui/Input';
-import { selectFile, addFile } from '../api';
+import { SelectFile, AddFile } from '../../wailsjs/go/main/App';
+import { useApp } from '../context/AppContext';
 
 export function Upload() {
-  const [selectedFilePath, setSelectedFilePath] = useState('');
+  const [filePath, setFilePath] = useState('');
   const [cid, setCid] = useState('');
-  const [error, setError] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+  const { addNotification } = useApp();
 
   const handleSelectFile = async () => {
     try {
-      const filePath = await selectFile();
-      setSelectedFilePath(filePath);
-      setError('');
-    } catch (err) {
-      setError('Failed to select file');
-      console.error(err);
+      const selectedFilePath = await SelectFile();
+      if (selectedFilePath) {
+        setFilePath(selectedFilePath);
+        setCid(''); // Clear previous CID when selecting new file
+        addNotification('File selected successfully', 'success');
+      }
+    } catch (error) {
+      addNotification(`Error selecting file: ${error}`, 'error');
     }
   };
 
   const handleAddFile = async () => {
-    if (!selectedFilePath) {
-      setError('Please select a file first');
+    if (!filePath) {
+      addNotification('Please select a file first.', 'error');
       return;
     }
+
+    setIsUploading(true);
     try {
-      const resultCid = await addFile(selectedFilePath);
-      setCid(resultCid);
-      setError('');
-    } catch (err) {
-      setError('Failed to add file');
-      console.error(err);
+      const fileCid = await AddFile(filePath);
+      setCid(fileCid);
+      addNotification(`File added successfully! CID: ${fileCid}`, 'success');
+    } catch (error) {
+      addNotification(`Error adding file: ${error}`, 'error');
+    } finally {
+      setIsUploading(false);
     }
   };
 
+  const copyToClipboard = async () => {
+    if (cid) {
+      try {
+        await navigator.clipboard.writeText(cid);
+        addNotification('CID copied to clipboard', 'success');
+      } catch (error) {
+        addNotification('Failed to copy CID', 'error');
+      }
+    }
+  };
+
+  const getFileName = (path) => {
+    if (!path) return '';
+    return path.split('\\').pop().split('/').pop();
+  };
+
   return (
-    <div className="p-4">
-      <h1 className="text-2xl font-bold mb-4">Upload a File</h1>
-      <div className="flex items-center space-x-2">
-        <Input
-          type="text"
-          readOnly
-          value={selectedFilePath}
-          placeholder="Click 'Select File' to choose a file"
-          className="flex-grow"
-        />
-        <Button onClick={handleSelectFile}>Select File</Button>
-      </div>
-      <Button onClick={handleAddFile} className="mt-2">
-        Add File
-      </Button>
-      {cid && (
-        <div className="mt-4 p-2 bg-green-100 border border-green-400 text-green-700 rounded">
-          Successfully added file with CID: {cid}
-        </div>
-      )}
-      {error && (
-        <div className="mt-4 p-2 bg-red-100 border border-red-400 text-red-700 rounded">
-          {error}
-        </div>
-      )}
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Upload File</CardTitle>
+          <CardDescription>
+            Select a file to share on the decentralized network.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <div className="flex space-x-2">
+              <Input
+                type="text"
+                readOnly
+                value={filePath ? getFileName(filePath) : ''}
+                placeholder="No file selected"
+                className="flex-1"
+              />
+              <Button onClick={handleSelectFile} disabled={isUploading}>
+                Select File
+              </Button>
+            </div>
+            {filePath && (
+              <p className="text-xs text-text-secondary">
+                Full path: {filePath}
+              </p>
+            )}
+          </div>
+
+          <Button 
+            onClick={handleAddFile} 
+            disabled={!filePath || isUploading}
+            className="w-full"
+          >
+            {isUploading ? 'Adding File...' : 'Add File to Network'}
+          </Button>
+
+          {cid && (
+            <div className="mt-6 p-4 border border-primary/20 rounded-card bg-primary/5">
+              <div className="flex justify-between items-start">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-primary">File Added Successfully!</p>
+                  <p className="text-sm text-text-secondary mt-1">Content Identifier (CID):</p>
+                  <p className="text-sm font-mono text-text break-all mt-1">{cid}</p>
+                </div>
+              </div>
+              <div className="flex space-x-2 mt-3">
+                <Button size="sm" onClick={copyToClipboard}>
+                  Copy CID
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setCid('')}>
+                  Clear
+                </Button>
+              </div>
+              <p className="text-xs text-text-secondary mt-2">
+                Share this CID with others so they can download your file.
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
